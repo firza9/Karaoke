@@ -78,7 +78,7 @@ function desktop(){
  incoming.on('stream',async s=>{if(call!==incoming)return;try{remoteTrack=s.getAudioTracks()[0];if(!remoteTrack)throw Error('No remote audio track');await startAudio(s,token);if(call!==incoming)return;$('connected').textContent='MIC CONNECTED';$('disconnect').disabled=false}catch(e){fail(e)}});
  incoming.on('close',()=>{if(call===incoming){stopCall();message('Mic disconnected.')}});incoming.on('error',fail);
  // Voice-only answer, no empty outbound stream.
- incoming.answer();message('Waiting for live audio…')};
+ incoming.answer(new MediaStream());message('Waiting for live audio…')};
  if(!window.Peer){message('Pairing library failed to load.','error');return}
  peer=new Peer(room);
  peer.on('open',()=>message('Ready! Scan QR and start microphone.','good'));

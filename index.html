@@ -8,17 +8,17 @@
 const $=id=>document.getElementById(id),query=new URLSearchParams(location.search),isPhone=query.get('mode')==='mic';
 const defaults={volume:70,bass:50,treble:50,reverb:0,echo:0};
 const profiles={Dry:{volume:70,bass:50,treble:50,reverb:0,echo:0},Studio:{volume:72,bass:50,treble:53,reverb:25,echo:8},Concert:{volume:70,bass:53,treble:53,reverb:55,echo:22}};
-let peer=null,call=null,pending=null,localStream=null,audio=null,remoteTrack=null,phoneMeter=null,phoneFrame=0,meterFrame=0,statsTimer=null,muted=false,lowLatency=true,deviceId='default',requestedRoom='',acceptToken=0;
+let peer=null,call=null,pending=null,localStream=null,audio=null,remoteTrack=null,phoneMeter=null,phoneFrame=0,meterFrame=0,statsTimer=null,muted=false,lowLatency=true,deviceId='default',requestedRoom='',acceptToken=0,standbyCtx=null;
 function message(s,type=''){const x=$('status');if(x){x.textContent=s;x.className='status '+type}}
 function fail(e){message(e?.message||String(e),'error')}
 function randomRoom(){return 'ks-'+[...crypto.getRandomValues(new Uint8Array(12))].map(v=>v.toString(16).padStart(2,'0')).join('')}
 function stopPhone(){cancelAnimationFrame(phoneFrame);if(phoneMeter){phoneMeter.close().catch(()=>{});phoneMeter=null}const old=call;call=null;if(old)old.close();localStream?.getTracks().forEach(t=>t.stop());localStream=null;if(peer){peer.destroy();peer=null}if($('start'))$('start').disabled=false;if($('stop'))$('stop').disabled=true}
 async function closeAudio(){cancelAnimationFrame(meterFrame);if(audio){const old=audio;audio=null;await old.ctx.close().catch(()=>{})}if($('bar'))$('bar').style.width='0%'}
-function stopCall(){++acceptToken;const old=call;call=null;if(old)old.close();clearInterval(statsTimer);statsTimer=null;remoteTrack=null;closeAudio();if($('connected'))$('connected').textContent='WAITING FOR MIC';if($('disconnect'))$('disconnect').disabled=true}
+function stopCall(){++acceptToken;const old=call;call=null;if(old)old.close();if(standbyCtx){standbyCtx.close().catch(()=>{});standbyCtx=null}clearInterval(statsTimer);statsTimer=null;remoteTrack=null;closeAudio();if($('connected'))$('connected').textContent='WAITING FOR MIC';if($('disconnect'))$('disconnect').disabled=true}
 function measure(analyser,ctx,kind){const bytes=new Uint8Array(analyser.fftSize);function loop(){if(kind==='phone'?(phoneMeter!==ctx):(audio?.ctx!==ctx))return;analyser.getByteTimeDomainData(bytes);let sum=0;for(let i=0;i<bytes.length;i++){const v=(bytes[i]-128)/128;sum+=v*v}const n=Math.min(100,Math.round(Math.sqrt(sum/bytes.length)*380));if($('bar'))$('bar').style.width=n+'%';if($('meterVal'))$('meterVal').textContent=n+'%';if(kind==='phone')phoneFrame=requestAnimationFrame(loop);else meterFrame=requestAnimationFrame(loop)}loop()}
 async function startAudio(media,token){
  await closeAudio();if(token!==acceptToken)return;
- const ctx=new (window.AudioContext||window.webkitAudioContext)({latencyHint:'interactive'});
+ const ctx=standbyCtx||new (window.AudioContext||window.webkitAudioContext)({latencyHint:'interactive'});standbyCtx=null;
  const source=ctx.createMediaStreamSource(media),input=ctx.createGain(),low=ctx.createBiquadFilter(),high=ctx.createBiquadFilter(),analyser=ctx.createAnalyser(),dry=ctx.createGain(),wet=ctx.createGain(),echoWet=ctx.createGain(),verb=ctx.createConvolver(),delay=ctx.createDelay(0.8),feedback=ctx.createGain(),sum=ctx.createGain(),limiter=ctx.createDynamicsCompressor();
  low.type='lowshelf';low.frequency.value=230;high.type='highshelf';high.frequency.value=3000;analyser.fftSize=1024;delay.delayTime.value=.19;feedback.gain.value=.17;limiter.threshold.value=-9;limiter.ratio.value=10;limiter.attack.value=.003;limiter.release.value=.1;
  const len=Math.floor(ctx.sampleRate*1.8),buffer=ctx.createBuffer(2,len,ctx.sampleRate);
@@ -74,7 +74,7 @@ function desktop(){
  Object.keys(defaults).forEach(k=>$(k).oninput=()=>{$(k+'Val').textContent=$(k).value+'%';audio?.update();document.querySelectorAll('[data-profile]').forEach(b=>b.classList.remove('active'))});
  document.querySelectorAll('[data-profile]').forEach(b=>b.onclick=()=>{apply(profiles[b.dataset.profile]);document.querySelectorAll('[data-profile]').forEach(x=>x.classList.toggle('active',x===b))});
  $('reject').onclick=()=>{pending?.close();pending=null;$('incoming').classList.add('hidden');message('Rejected.')};
- $('accept').onclick=async()=>{if(!pending)return;const incoming=pending;pending=null;$('incoming').classList.add('hidden');stopCall();call=incoming;const token=acceptToken;watch(incoming);
+ $('accept').onclick=async()=>{if(!pending)return;const incoming=pending;pending=null;$('incoming').classList.add('hidden');stopCall();call=incoming;const token=acceptToken;standbyCtx=new (window.AudioContext||window.webkitAudioContext)({latencyHint:'interactive'});standbyCtx.resume().catch(fail);watch(incoming);
  incoming.on('stream',async s=>{if(call!==incoming)return;try{remoteTrack=s.getAudioTracks()[0];if(!remoteTrack)throw Error('No remote audio track');await startAudio(s,token);if(call!==incoming)return;$('connected').textContent='MIC CONNECTED';$('disconnect').disabled=false}catch(e){fail(e)}});
  incoming.on('close',()=>{if(call===incoming){stopCall();message('Mic disconnected.')}});incoming.on('error',fail);
  // Voice-only answer, no empty outbound stream.

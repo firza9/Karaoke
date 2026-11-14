@@ -33,13 +33,13 @@ function tuneJitter(c){let available=false;try{for(const receiver of c.peerConne
 
 const KARA_CAPTURE_WORKLET="class KaraCapture extends AudioWorkletProcessor {\n constructor(){super();this.buf=new Float32Array(256);this.n=0;this.seq=0}\n process(inputs){const input=inputs[0]?.[0];if(input){for(let i=0;i<input.length;i++){this.buf[this.n++]=input[i];if(this.n===256){this.port.postMessage({buffer:this.buf.buffer,seq:this.seq++},[this.buf.buffer]);this.buf=new Float32Array(256);this.n=0}}}return true}\n} registerProcessor('kara-capture',KaraCapture);";
 const KARA_PLAYBACK_WORKLET="class KaraPlayback extends AudioWorkletProcessor {\n constructor(){super();this.buf=new Float32Array(8192);this.r=0;this.w=0;this.size=0;this.ready=false;this.target=768;this.max=1536;this.lastReport=0;this.drops=0;this.underruns=0;this.port.onmessage=e=>{if(e.data==='clear'){this.r=this.w=this.size=0;this.ready=false;return}let data=e.data instanceof ArrayBuffer?new Float32Array(e.data):e.data;if(!(data instanceof Float32Array))return;const overflow=Math.max(0,this.size+data.length-this.max);if(overflow){this.r=(this.r+overflow)%this.buf.length;this.size-=Math.min(this.size,overflow);this.drops++}for(let i=0;i<data.length;i++){this.buf[this.w]=data[i];this.w=(this.w+1)%this.buf.length;if(this.size<this.buf.length)this.size++;else this.r=(this.r+1)%this.buf.length}if(this.size>=this.target)this.ready=true}}\n process(inputs,outputs){const out=outputs[0]?.[0];if(!out)return true;out.fill(0);if(this.ready){for(let i=0;i<out.length;i++){if(!this.size){this.ready=false;this.underruns++;break}out[i]=this.buf[this.r];this.r=(this.r+1)%this.buf.length;this.size--}}if(currentFrame-this.lastReport>sampleRate){this.lastReport=currentFrame;this.port.postMessage({bufferMs:Math.round(this.size/sampleRate*1000),drops:this.drops,underruns:this.underruns})}return true}\n} registerProcessor('kara-playback',KaraPlayback);";
-let fastConn=null,fastCapture=null,fastPlayer=null,fastActive=false,fastRequested=false,fastPackets=0,fastPacketTimestamp=0,fastBufferMs=0,fastDrops=0,fastUnderruns=0,fastLastSequence=-1,fastOutOfOrder=0,fastTransitMs=null,fastClockOffset=null,fastClockRtt=null,fastSyncTimer=null;
+let fastConn=null,fastCapture=null,fastPlayer=null,fastActive=false,fastRequested=false,fastPackets=0,fastPacketTimestamp=0,fastBufferMs=0,fastDrops=0,fastUnderruns=0,fastLastSequence=-1,fastOutOfOrder=0,fastTransitMs=null,fastClockOffset=null,fastClockRtt=null,fastSyncTimer=null,fastMicSender=null,fastPausedEngine=false;
 async function loadWorklet(ctx,source){const url=URL.createObjectURL(new Blob([source],{type:'text/javascript'}));try{await ctx.audioWorklet.addModule(url)}finally{URL.revokeObjectURL(url)}}
-function stopFastCapture(){if(!fastCapture)return;const old=fastCapture;fastCapture=null;try{old.src.disconnect();old.node.disconnect();old.silent.disconnect();old.node.port.onmessage=null}catch{}old.ctx.close().catch(()=>{})}
+function stopFastCapture(){if(fastMicSender){const sender=fastMicSender;fastMicSender=null;const track=stream?.getAudioTracks()[0];if(track?.readyState==='live')sender.replaceTrack(track).catch(e=>console.warn('Standard microphone restore:',e))}if(!fastCapture)return;const old=fastCapture;fastCapture=null;try{old.src.disconnect();old.node.disconnect();old.silent.disconnect();old.node.port.onmessage=null}catch{}old.ctx.close().catch(()=>{})}
 async function startFastCapture(){
  if(!stream||!fastConn?.open||fastCapture)return;
  try{
-  const ctx=new (window.AudioContext||window.webkitAudioContext)({latencyHint:'interactive'});
+  const ctx=new (window.AudioContext||window.webkitAudioContext)({latencyHint:0.005});
   if(!ctx.audioWorklet)throw Error('AudioWorklet not available on iPhone');
   await loadWorklet(ctx,KARA_CAPTURE_WORKLET);
   if(!stream||!fastConn?.open){await ctx.close();return}
@@ -54,21 +54,25 @@ async function startFastCapture(){
    const dc=fastConn.dataChannel;
    if(dc&&dc.readyState==='open'&&dc.bufferedAmount<4096)fastConn.send(bytes);
   };
-  await ctx.resume();status('Fast PCM sending to laptop. Keep Safari open.','success');
+  await ctx.resume();if(fastCapture!==item)return;
+  if(phoneMeter){const m=phoneMeter;phoneMeter=null;cancelAnimationFrame(m.frame);m.ctx.close().catch(()=>{});if($('meterValue'))$('meterValue').textContent='FAST';}
+  const sender=call?.peerConnection?.getSenders?.().find(s=>s.track?.kind==='audio');
+  if(sender){try{await sender.replaceTrack(null);if(fastCapture===item)fastMicSender=sender;else await sender.replaceTrack(stream?.getAudioTracks()[0]||null)}catch(e){console.warn('Fast microphone sender pause unsupported:',e)}}
+  status('Fast PCM active. Standard mic encoding paused to reduce iPhone workload.','success');
  }catch(e){stopFastCapture();fail(e)}
 }
 function prepareFastPhone(connection){fastConn=connection;connection.on('data',d=>{if(typeof d==='string'&&d.startsWith('sync:')){const t1=Number(d.slice(5));if(Number.isFinite(t1)&&connection.open)connection.send('sync-reply:'+t1+':'+performance.now());return}if(d==='fast:start')startFastCapture();if(d==='fast:stop'){stopFastCapture();status('Standard microphone connected.','success')}});connection.on('close',()=>{if(fastConn===connection){stopFastCapture();fastConn=null}});connection.on('error',e=>{stopFastCapture();fail(e)})}
-function stopFastPlayer(){if(fastSyncTimer){clearInterval(fastSyncTimer);fastSyncTimer=null}fastRequested=false;fastTransitMs=null;fastClockOffset=null;fastClockRtt=null;fastActive=false;if(fastPlayer){const p=fastPlayer;fastPlayer=null;try{p.node.disconnect();p.gain.disconnect()}catch{}p.ctx.close().catch(()=>{})}if($('fast'))$('fast').textContent=fastConn?.open?'Start Fast Audio':'Connect Fast Audio';if(engine)engine.update()}
+function stopFastPlayer(){if(fastPausedEngine&&engine?.ctx?.state==='suspended'){engine.ctx.resume().catch(()=>{})}fastPausedEngine=false;if(fastSyncTimer){clearInterval(fastSyncTimer);fastSyncTimer=null}fastRequested=false;fastTransitMs=null;fastClockOffset=null;fastClockRtt=null;fastActive=false;if(fastPlayer){const p=fastPlayer;fastPlayer=null;try{p.node.disconnect();p.gain.disconnect()}catch{}p.ctx.close().catch(()=>{})}if($('fast'))$('fast').textContent=fastConn?.open?'Start Fast Audio':'Connect Fast Audio';if(engine)engine.update()}
 async function enableFastPlayer(){
  if(!fastConn?.open||!receivedTrack)throw Error('Fast channel not connected. Wait for mic and retry.');
  if(!window.AudioWorkletNode)throw Error('AudioWorklet unavailable on laptop browser.');
- const ctx=new AudioContext({latencyHint:'interactive'});await loadWorklet(ctx,KARA_PLAYBACK_WORKLET);
+ const ctx=new AudioContext({latencyHint:0.005});await loadWorklet(ctx,KARA_PLAYBACK_WORKLET);
  const node=new AudioWorkletNode(ctx,'kara-playback',{outputChannelCount:[1]});
  const gain=ctx.createGain();gain.gain.value=muted?0:1;node.connect(gain).connect(ctx.destination);node.port.onmessage=e=>{if(e.data&&typeof e.data.bufferMs==='number'){fastBufferMs=e.data.bufferMs;fastDrops=e.data.drops;fastUnderruns=e.data.underruns}};
  await ctx.resume();if(ctx.state!=='running'){await ctx.close();throw Error('Laptop audio not running. Click Enable laptop audio first.')}
  fastPlayer={ctx,node,gain};fastActive=true;fastPackets=0;fastTransitMs=null;fastBufferMs=0;fastDrops=0;fastUnderruns=0;fastLastSequence=-1;fastOutOfOrder=0;fastClockOffset=null;fastClockRtt=null;fastPacketTimestamp=performance.now();
  if(rawAudio){rawAudio.pause();rawAudio.srcObject=null;rawAudio.remove();rawAudio=null}
- rawMode=true;engine?.update();if($('raw'))$('raw').textContent='Test direct audio';
+ rawMode=true;engine?.update();if(engine?.ctx?.state==='running'){engine.ctx.suspend().then(()=>{if(fastActive)fastPausedEngine=true;else engine?.ctx.resume().catch(()=>{})}).catch(()=>{})}if($('raw'))$('raw').textContent='Test direct audio';
  fastConn.send('fast:start');if(fastSyncTimer)clearInterval(fastSyncTimer);const ping=()=>{if(fastConn?.open&&fastActive)fastConn.send('sync:'+performance.now())};ping();fastSyncTimer=setInterval(ping,1500);$('fast').textContent='Stop Fast Audio';status('Fast Audio ON: streaming uncompressed mic through low-buffer playback.','success');
 }
 async function toggleFast(){if(!fastConn?.open){if(!call?.peer){status('Connect microphone first.','error');return}if(fastConn){try{fastConn.close()}catch{}fastConn=null}try{const channel=peer.connect(call.peer,{label:'kara-fast',serialization:'raw',reliable:false});prepareFastDesktop(channel);$('fast').textContent='Connecting Fast Audio…';status('Opening Fast Audio data channel…','success')}catch(e){fail(e)}return}if(fastActive){fastConn?.open&&fastConn.send('fast:stop');stopFastPlayer();rawMode=false;engine?.update();status('Standard audio restored.','success');return}try{await enableFastPlayer()}catch(e){stopFastPlayer();rawMode=false;engine?.update();fail(e)}}
